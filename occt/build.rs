@@ -25,7 +25,8 @@ fn main() {
     let occt_dir = format!("{dir}/{OCCT_DIR}");
 
     println!("cargo:rustc-link-search=native={occt_dir}/lib");
-        
+    println!("cargo:rustc-link-search=native={occt_dir}/win64/vc14/lib");
+
     for lib in OCCT_LIBS {
         println!("cargo:rustc-link-lib=static={lib}");
     }
@@ -35,6 +36,7 @@ fn main() {
         .file("src/occt.cpp")
         .std("c++17")
         .include(format!("{occt_dir}/include/opencascade"))
+        .include(format!("{occt_dir}/inc"))
         .compile("occt");
 
     println!("cargo:rerun-if-changed=src/occt.rs");

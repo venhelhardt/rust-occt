@@ -1,9 +1,8 @@
 use crate::gfx;
 
-use std::collections::VecDeque;
 use std::rc::Rc;
-use std::sync::mpsc;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 
 use gl::types::{GLfloat, GLint, GLsizei, GLsizeiptr, GLuint, GLvoid};
 
@@ -192,20 +191,16 @@ struct GeneratedModel {
 
 struct ModelGenerator {
     pool: Rc<threadpool::ThreadPool>,
-    enq: Arc<mpsc::Sender<GeneratedModel>>,
-    deq: mpsc::Receiver<GeneratedModel>,
     max_queue_size: u32,
     beat_interval: u32,
-    // Requests queue, (timestamp, model)
-    // Model is None for pending requests or consumed by dequeue
-    queue: VecDeque<(u32, Option<GeneratedModel>)>,
     // Number of enqueued mesh generations
-    enqueue_size: u32,
+    enqueue_size: Arc<AtomicU32>,
+    curr_model_sync: Arc<Mutex<(u32, Option<GeneratedModel>)>>,
 }
 
 impl Drop for ModelGenerator {
     fn drop(&mut self) {
-        if !self.queue.is_empty() {
+        if self.enqueue_size.load(Ordering::Acquire) > 0 {
             self.pool.join();
         }
     }
@@ -221,17 +216,12 @@ impl ModelGenerator {
         max_queue_size: u32,
         beat_interval: u32,
     ) -> Self {
-        let (enq, deq): (mpsc::Sender<GeneratedModel>, mpsc::Receiver<GeneratedModel>) =
-            std::sync::mpsc::channel();
-
         Self {
             pool: pool,
-            enq: Arc::new(enq),
-            deq: deq,
             max_queue_size: max_queue_size,
             beat_interval: beat_interval,
-            queue: VecDeque::new(),
-            enqueue_size: 0,
+            enqueue_size: Arc::new(AtomicU32::new(0)),
+            curr_model_sync: Arc::new(Mutex::new((0, None))),
         }
     }
 
@@ -240,67 +230,22 @@ impl ModelGenerator {
     }
 
     fn queue_size(&self) -> u32 {
-        self.enqueue_size as u32
+        self.enqueue_size.load(Ordering::Relaxed) as u32
     }
 
     fn dequeue(&mut self, ts: u32) -> Option<GeneratedModel> {
-        // Drain queue
-        loop {
-            let deq: Result<GeneratedModel, mpsc::TryRecvError> = self.deq.try_recv();
+        if self.enqueue_size.load(Ordering::Acquire) < self.max_queue_size {
+            self.enqueue_size.fetch_add(1, Ordering::Relaxed);
 
-            if deq.is_err() {
-                break;
-            }
-
-            self.enqueue_size -= 1;
-
-            let recv_model = deq.unwrap();
-
-            // Update requested mesh, otherwise discard it (since request was dropped)
-            if let Some(first_model) = self.queue.front() {
-                if first_model.0 <= recv_model.ts {
-                    let idx = (recv_model.ts - first_model.0) as usize;
-
-                    if idx < self.queue.len() && self.queue[idx].0 == recv_model.ts {
-                        self.queue[idx].1 = Some(recv_model);
-                    }
-                }
-            }
-        }
-
-        // Drop all staled models except one
-        while self.queue.len() > 1 && self.queue[1].0 <= ts {
-            self.queue.pop_front();
-        }
-
-        // Drop everything outside [ts, ts + self.max_queue_size]
-        while !self.queue.is_empty() && self.queue[0].0 + self.max_queue_size < ts {
-            self.queue.pop_front();
-        }
-
-        while !self.queue.is_empty() && self.queue.back().unwrap().0 > ts + self.max_queue_size {
-            self.queue.pop_back();
-        }
-
-        // Schedule generations
-        let beat_interval = self.beat_interval;
-
-        while self.max_queue_size > self.queue.len() as u32 {
-            let gen_ts = if self.queue.is_empty() {
-                ts
-            } else {
-                self.queue.back().unwrap().0 + 1
-            };
-
-            self.queue.push_back((gen_ts, None));
-            self.enqueue_size += 1;
-
-            let enq = self.enq.clone();
+            let beat_interval = self.beat_interval;
+            let gen_ts = ts;
+            let curr_model_sync = self.curr_model_sync.clone();
+            let enq_size = self.enqueue_size.clone();
 
             self.pool.execute(move || {
                 let interval = gen_ts / beat_interval;
                 let mut width: (f64, f64) = (0.5, 0.55);
-                let mut thickness: (f64, f64) = (0.25, 0.35);
+                let mut thickness: (f64, f64) = (0.25, 0.55);
                 let mut height: (f64, f64) = (0.75, 1.0);
 
                 if interval & 1 == 0 {
@@ -316,15 +261,17 @@ impl ModelGenerator {
                     Self::lerp_f64(height.0, height.1, delta),
                 );
 
-                enq.send(GeneratedModel {
-                    ts: gen_ts,
-                    mesh: mesh,
-                })
-                .unwrap();
+                let mut curr_model = curr_model_sync.lock().unwrap();
+
+                if curr_model.0 <= ts {
+                    curr_model.0 = ts;
+                    curr_model.1 = Some(GeneratedModel { ts: ts, mesh: mesh });
+                }
+
+                enq_size.fetch_sub(1, Ordering::Release);
             });
         }
 
-        // Consume 'best' model
-        return self.queue[0].1.take();
+        return self.curr_model_sync.lock().unwrap().1.take();
     }
 }
