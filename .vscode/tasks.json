@@ -1,0 +1,30 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "build debug",
+			"args": ["build"],
+			"command": "cargo",
+			"group": {
+				"kind": "build",
+				"isDefault": true
+			}
+		},
+		{
+			"label": "build release",
+			"args": ["build", "--release"],
+			"command": "cargo",
+			"group": {
+				"kind": "build"
+			}
+		},
+		{
+			"label": "clean",
+			"args": ["clean"],
+			"command": "cargo",
+			"presentation": {
+			  "reveal": "always"
+			}
+		}
+	]
+}

@@ -1,0 +1,12 @@
+[package]
+name = "rust-occt"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+gl = "0.14"
+glam = "0.24"
+piston_window = "0.130"
+rusttype = "0.9"
+threadpool = "1.8"
+occt = { path = "occt" }
